@@ -1,4 +1,35 @@
-import { useState, useEffect } from 'react'
+import React, {useState, useEffect, useCallback} from 'react'
+import { useAuth } from './AuthContext';
+import Link from "next/link";
+
+interface User {
+    id: number;
+    email: string;
+    username?: string;
+    firstName?: string;
+    lastName?: string;
+    fullName?: string;
+    birthDate?: {
+        year: number;
+        month: number;
+        day: number;
+    };
+    zodiacSign?: string;
+    saju?: string; // JSON 문자열 형태로 저장된 사주 정보
+    createdAt?: Date;
+    updatedAt?: Date;
+    isActive?: boolean;
+    role?: 'user' | 'admin' | 'moderator';
+    profileImageUrl?: string;
+    lastLoginDate?: Date;
+}
+interface Saju {
+    year: string;
+    month: string;
+    day: string;
+    yearElement: string;
+    dayElement: string;
+}
 
 const SajuVisualization = ({ saju }: { saju: any }) => (
     <svg width="200" height="200" viewBox="0 0 200 200">
@@ -72,45 +103,52 @@ function calculateSaju(year: number, month: number, day: number) {
 }
 
 export default function Component() {
+    const { user, loading, error, logout } = useAuth() as {
+        user: User | null,
+        loading: boolean,
+        error: string | null,
+        logout: () => void
+    };
+
     const [birthDate, setBirthDate] = useState({ year: '', month: '', day: '' })
     const [isEditing, setIsEditing] = useState(true)
     const [zodiacSign, setZodiacSign] = useState('')
-    const [saju, setSaju] = useState<any>(null)
-    const [userId, setUserId] = useState<number | null>(null)
-    // 사용자 ID를 가져오는 함수 (예: 로컬 스토리지나 서버에서 가져오기)
-    const fetchCurrentUserId = async () => {
-        try {
-            const response = await fetch('http://localhost:8080/api/auth/current-user');
-            const data = await response.json();
-            setUserId(data.id);  // 사용자 ID를 설정
-        } catch (error) {
-            console.error('Failed to fetch current user ID:', error);
-        }
-    };
-    useEffect(() => {
-        fetchCurrentUserId();
-    }, []);
+    const [saju, setSaju] = useState<Saju | null>(null);
 
-    useEffect(() => {
-        if (userId) {
-            fetchUserInfo();
+    const handleSubmit = useCallback(async (e: React.FormEvent) => {
+        e.preventDefault();
+        setIsEditing(false);
+        if (!isValidDate(birthDate.year, birthDate.month, birthDate.day)) {
+            alert('올바른 날짜를 입력해주세요.');
+            return;
         }
-    }, [userId]);
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault()
-        setIsEditing(false)
+        if (!user || !user.id) {
+            console.error('User not authenticated');
+            // 사용자에게 알림을 표시할 수 있습니다.
+            alert('로그인이 필요합니다. 다시 로그인해 주세요.');
+            // 로그인 페이지로 리디렉션하거나 다른 적절한 처리를 할 수 있습니다.
+            return;
+        }
 
-        const sign = getZodiacSign(parseInt(birthDate.month), parseInt(birthDate.day))
+        const sign = getZodiacSign(parseInt(birthDate.month), parseInt(birthDate.day));
         const sajuResult = calculateSaju(
             parseInt(birthDate.year),
             parseInt(birthDate.month),
             parseInt(birthDate.day)
-        )
+        );
 
         try {
-            const response = await fetch('http://localhost:8080/api/user-info', {
+            const token = localStorage.getItem('jwtToken');
+            if (!token) {
+                throw new Error('Authentication token not found');
+            }
+
+            const response = await fetch(`http://localhost:8080/api/user-info/${user.id}`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
                 body: JSON.stringify({
                     birthYear: parseInt(birthDate.year),
                     birthMonth: parseInt(birthDate.month),
@@ -119,39 +157,96 @@ export default function Component() {
                     saju: JSON.stringify(sajuResult)
                 })
             });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.message || 'Failed to save user info');
+            }
+
             const data = await response.json();
-            setUserId(data.id);
+            console.log('User info saved successfully:', data);
+
             setZodiacSign(sign);
             setSaju(sajuResult);
+
+            // 사용자에게 성공 메시지를 표시할 수 있습니다.
+            alert('정보가 성공적으로 저장되었습니다.');
+
         } catch (error) {
             console.error('Failed to save user info:', error);
+            // 사용자에게 오류 메시지를 표시할 수 있습니다.
+            alert('정보 저장 중 오류가 발생했습니다. 다시 시도해 주세요.');
+            setIsEditing(true); // 사용자가 다시 입력할 수 있도록 편집 모드로 전환
         }
-    }
-
-    const fetchUserInfo = async () => {
-        if (!userId) return;
-
+    }, [user, birthDate]);
+    const isValidDate = (year: string, month: string, day: string) => {
+        const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+        return date.getFullYear() === parseInt(year) &&
+            date.getMonth() === parseInt(month) - 1 &&
+            date.getDate() === parseInt(day);
+    };
+    const [isLoading, setIsLoading] = useState(false);
+    const [fetchError, setFetchError] = useState<string | null>(null);
+    const fetchUserInfo = useCallback(async (userId: number) =>{
+        setIsLoading(true);
         try {
-            const response = await fetch(`http://localhost:8080/api/user-info/${userId}`);
-            const data = await response.json();
-            setBirthDate({
-                year: data.birthYear.toString(),
-                month: data.birthMonth.toString(),
-                day: data.birthDay.toString()
+            const token = localStorage.getItem('jwtToken');
+            console.log("Fetching user info with token:", token);  // 토큰 로깅
+
+            const response = await fetch(`http://localhost:8080/api/user-info/${userId}`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
             });
-            setZodiacSign(data.zodiacSign);
-            setSaju(JSON.parse(data.saju));
-            setIsEditing(false);
-        } catch (error) {
+            console.log("User info response:", response);  // 응답 로깅
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Failed to fetch user info: ${response.status} ${errorText}`);
+            }
+            const data = await response.json();
+            console.log("Fetched user info:", data);  // 받아온 데이터 로깅
+
+            if (data && data.birthYear) {
+                setBirthDate({
+                    year: data.birthYear.toString(),
+                    month: data.birthMonth.toString(),
+                    day: data.birthDay.toString()
+                });
+                setZodiacSign(data.zodiacSign);
+                setSaju(JSON.parse(data.saju));
+                setIsEditing(false);
+            } else {
+                console.log("No birth date information available");
+                setIsEditing(true);
+            }
+        }catch (error) {
             console.error('Failed to fetch user info:', error);
+            setIsEditing(true);
+            setFetchError('사용자 정보를 불러오는데 실패했습니다. 다시 시도해주세요.');
+        }finally {
+            setIsLoading(false);
         }
-    }
-
+    }, []);
     useEffect(() => {
-        fetchUserInfo();
-    }, [userId]);
+        const fetchData = async () => {
+            if (user) {
+                console.log("User data:", user);  // user 객체 로깅
+                if (user.id) {
+                    await fetchUserInfo(user.id);
+                } else {
+                    console.error("User object doesn't have an id property", user);
+                    // 여기서 적절한 처리를 추가할 수 있습니다. 예를 들어:
+                    setIsEditing(true);
+                }
+            } else {
+                console.log("User not logged in or data not loaded yet");
+            }
+        };
 
-
+        fetchData();
+    },  [user, fetchUserInfo]);
     const containerStyle: React.CSSProperties = {
         maxWidth: '800px',
         margin: '0 auto',
@@ -195,9 +290,27 @@ export default function Component() {
         cursor: 'pointer',
         fontSize: '1rem',
     }
+    if (loading) {
+        return <div>로딩 중...</div>;
+    }
 
+    if (error) {
+        return <div>오류 발생: {error}</div>;
+    }
+
+    if (!user) {
+        return <div>로그인이 필요합니다.</div>;
+    }
+    if (fetchError) {
+        return <div>오류: {fetchError}</div>;
+    }
+    if (isLoading) { return <div>사용자 정보를 불러오는 중...</div>; }
     return (
         <div style={containerStyle}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                <h1 style={{ ...titleStyle }}>안녕하세요, {user.email}님!</h1>
+                <button aria-label="로그아웃" onClick={logout} style={buttonStyle}>로그아웃</button>
+            </div>
             <h1 style={{ ...titleStyle, marginBottom: '1rem' }}>생년월일 및 운세 정보</h1>
 
             <div style={cardStyle}>
@@ -212,6 +325,9 @@ export default function Component() {
                                     <label htmlFor="year" style={{ display: 'block', marginBottom: '0.25rem' }}>년</label>
                                     <input
                                         id="year"
+                                        type="number"
+                                        min="1900"
+                                        max={new Date().getFullYear()}
                                         style={inputStyle}
                                         value={birthDate.year}
                                         onChange={(e) => setBirthDate({ ...birthDate, year: e.target.value })}
@@ -223,6 +339,9 @@ export default function Component() {
                                     <label htmlFor="month" style={{ display: 'block', marginBottom: '0.25rem' }}>월</label>
                                     <input
                                         id="month"
+                                        type="number"
+                                        min="1"
+                                        max="12"
                                         style={inputStyle}
                                         value={birthDate.month}
                                         onChange={(e) => setBirthDate({ ...birthDate, month: e.target.value })}
@@ -234,6 +353,9 @@ export default function Component() {
                                     <label htmlFor="day" style={{ display: 'block', marginBottom: '0.25rem' }}>일</label>
                                     <input
                                         id="day"
+                                        type="number"
+                                        min="1"
+                                        max="31"
                                         style={inputStyle}
                                         value={birthDate.day}
                                         onChange={(e) => setBirthDate({ ...birthDate, day: e.target.value })}
@@ -247,6 +369,12 @@ export default function Component() {
                     ) : (
                         <div>
                             <p>생년월일: {birthDate.year}년 {birthDate.month}월 {birthDate.day}일</p>
+                            {user && (
+                                <Link href={`/saju-analysis/${user.id}`}>
+                                    내 사주 분석 결과 보기
+                                </Link>
+                            )}
+                            <br></br>
                             <button onClick={() => setIsEditing(true)} style={{ ...buttonStyle, marginTop: '0.5rem' }}>수정</button>
                         </div>
                     )}
